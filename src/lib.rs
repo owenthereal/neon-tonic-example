@@ -7,13 +7,11 @@ use tokio::runtime::Runtime;
 use tonic::{transport::Server, Request, Response, Status};
 
 fn start_func(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let callback = cx.argument::<JsFunction>(0)?.root(&mut cx);
-
-    // how to pass this callback into FunctionImpl and call the function in javascript
-    // see CALL_CALLBACK below
+    let f = cx.argument::<JsFunction>(0)?.root(&mut cx);
+    let channel = cx.channel();
 
     let addr = "[::1]:50051".parse().unwrap();
-    let func = Function {};
+    let func = Function { ch: channel };
 
     let rt = runtime(&mut cx)?;
     let result = rt.block_on(
@@ -31,7 +29,9 @@ fn runtime<'a, C: Context<'a>>(cx: &mut C) -> NeonResult<&'static Runtime> {
     RUNTIME.get_or_try_init(|| Runtime::new().or_else(|err| cx.throw_error(err.to_string())))
 }
 
-pub struct Function {}
+pub struct Function {
+    ch: Channel,
+}
 
 #[tonic::async_trait]
 impl function_server::Function for Function {
@@ -42,9 +42,17 @@ impl function_server::Function for Function {
         println!("Got a request: {:?}", request);
 
         let value = request.into_inner().value;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
 
-        // CALL_CALLBACK by passing in records
+        self.ch.send(move |mut cx| {
+            // QUESTION: How would I pass `f` here?
+            let f = f.into_inner(&mut cx);
+            let this = cx.undefined();
+            let value: Handle<JsString> = f.call(&mut cx, this, [])?;
+            sender.send(value.value(&mut cx));
+        });
 
+        let value = receiver.recv().await.unwrap();
         let reply = FunctionResponse { value: value };
 
         Ok(Response::new(reply))

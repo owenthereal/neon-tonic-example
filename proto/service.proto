@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package function;
+
+message FunctionRequest {
+  string value = 1;
+}
+
+message FunctionResponse {
+  string value = 1;
+}
+
+service Function {
+  rpc Process(FunctionRequest) returns (FunctionResponse);
+}

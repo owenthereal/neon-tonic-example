@@ -3,33 +3,16 @@ mod function;
 use function::*;
 use neon::prelude::*;
 use once_cell::sync::OnceCell;
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tonic::{transport::Server, Request, Response, Status};
 
-struct NeonRef {
-    channel: Channel,
-    callback: Root<JsFunction>,
-}
-
-fn channel<'a, C: Context<'a>>(cx: &mut C) -> NeonResult<&'static Channel> {
-    static CHANNEL: OnceCell<Channel> = OnceCell::new();
-    CHANNEL.get_or_try_init(|| Ok(cx.channel()))
-}
-
-static CHANNEL_CELL: OnceCell<Channel> = OnceCell::new();
-static CALLBACK_CELL: OnceCell<Root<JsFunction>> = OnceCell::new();
-
 fn start_func(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    CHANNEL_CELL.set(cx.channel());
-    CALLBACK_CELL.set(cx.argument::<JsFunction>(0)?.root(&mut cx));
-
-    // let intercept = |mut req: Request<()>| -> Result<Request<()>, Status> {
-    //     req.extensions_mut().insert(NEON_CELL.get());
-    //     Ok(req)
-    // };
-
     let addr = "[::1]:50051".parse().unwrap();
-    let func = Function {};
+    let func = Function {
+        channel: Arc::new(cx.channel()),
+        callback: Arc::new(cx.argument::<JsFunction>(0)?.root(&mut cx)),
+    };
     let svc = function_server::FunctionServer::new(func);
 
     let rt = runtime(&mut cx)?;
@@ -44,7 +27,10 @@ fn runtime<'a, C: Context<'a>>(cx: &mut C) -> NeonResult<&'static Runtime> {
     RUNTIME.get_or_try_init(|| Runtime::new().or_else(|err| cx.throw_error(err.to_string())))
 }
 
-pub struct Function {}
+pub struct Function {
+    channel: Arc<Channel>,
+    callback: Arc<Root<JsFunction>>,
+}
 
 #[tonic::async_trait]
 impl function_server::Function for Function {
@@ -54,25 +40,35 @@ impl function_server::Function for Function {
     ) -> Result<Response<FunctionResponse>, Status> {
         println!("Got a request: {:?}", request);
 
-        let value = request.into_inner().value;
-        let channel: &Channel = CHANNEL_CELL.get().unwrap();
+        let request_val = request.into_inner().value;
+        let channel = self.channel.clone();
 
-        // let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
 
-        channel.send(|mut cx| {
-            let f: &Root<JsFunction> = CALLBACK_CELL.get().unwrap(); 
-            let f = f.into_inner(&mut cx);
-            // let this = cx.undefined();
-            // let value: Handle<JsString> = f.call(&mut cx, this, [])?;
-            // sender.send(value.value(&mut cx));
+        let f = self.callback.clone();
+        println!("before channel");
+        channel.send(move |mut cx| {
+            println!("inside channel");
 
+            let f = f.to_inner(&mut cx);
+            let this = cx.undefined();
+            let arg: Handle<JsString> = cx.string(request_val);
+            let value: Handle<JsValue> = f.call(&mut cx, this, vec![arg.upcast()])?;
+            let value: Handle<JsString> = value.downcast_or_throw(&mut cx)?;
+
+            println!("{}", value.value(&mut cx));
+
+            sender.send(value.value(&mut cx)).unwrap();
             Ok(())
         });
+        println!("after channel");
 
-        //let value = receiver.recv().await.unwrap();
-        let reply = FunctionResponse { value: value };
-
+        tokio::select! {
+            val = receiver => {
+        let reply = FunctionResponse { value: val.unwrap() };
         Ok(Response::new(reply))
+            }
+        }
     }
 }
 

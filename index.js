@@ -3,5 +3,8 @@
 const {startFunc} = require(".");
 
 startFunc(function(value) {
-    return value
+    console.log("hihihihihi")
+    console.log(value)
+
+    return "Hello, " + value
 })
